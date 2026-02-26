@@ -163,6 +163,12 @@ private fun createMemoryLayer(
     config: AppConfig,
     embeddingClient: com.kai.llm.EmbeddingClient
 ): com.kai.memory.MemoryLayer {
+    // API key yoksa veya DB ayarlanmamissa direkt in-memory kullan
+    if (config.postgresUrl.isBlank()) {
+        logger.info("No database configured, using in-memory memory layer")
+        return InMemoryMemoryLayer()
+    }
+
     return try {
         val database = Database.connect(
             url = config.postgresUrl,
@@ -171,14 +177,21 @@ private fun createMemoryLayer(
             password = config.postgresPassword
         )
 
+        // Eager connection test — lazy olmadan hatayi burada yakala
+        org.jetbrains.exposed.sql.transactions.transaction(database) {
+            exec("SELECT 1")
+        }
+
         val pgVectorStore = PgVectorStore(database)
 
         val neo4jDriver = GraphDatabase.driver(
             config.neo4jUrl,
             AuthTokens.basic(config.neo4jUser, config.neo4jPassword)
         )
+        neo4jDriver.verifyConnectivity()
         val neo4jStore = Neo4jStore(neo4jDriver)
 
+        logger.info("Connected to PostgreSQL and Neo4j")
         DualMemory(pgVectorStore, neo4jStore, embeddingClient)
     } catch (e: Exception) {
         logger.warn("Database connection failed, using in-memory fallback: ${e.message}")

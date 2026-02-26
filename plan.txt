@@ -1,0 +1,1000 @@
+# 🏗️ Kotlin/KTOR Geliştirici Asistanı — Ajan Mimarisi Tasarımı
+
+## Genel Bakış
+
+Bu doküman, **kod üretimi / geliştirici asistanı** amacıyla KTOR backend üzerinde çalışacak bir AI ajan sisteminin mimari tasarımını sunar. Dört temel pattern birleştirilmiştir:
+
+| Pattern | Rolü | Kotlin Karşılığı |
+|---------|-------|-------------------|
+| **ReAct** | Düşün → Araç Kullan → Gözlemle → Tekrarla | Coroutine-based state machine + sealed class |
+| **Multi-Agent** | Uzman ajanların iş bölümü | KTOR Actor pattern + Channel iletişimi |
+| **Memory** | Episodic + Semantic hafıza | PostgreSQL (pgvector) + Neo4j |
+| **PEV** | Planla → Uygula → Doğrula | Pipeline pattern + verification gate |
+
+---
+
+## 1. Üst Düzey Mimari
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      KTOR Backend                           │
+│                                                             │
+│  ┌──────────┐    ┌──────────────┐    ┌──────────────────┐   │
+│  │ WebSocket│───▶│ Meta-Controller│───▶│  Agent Router   │   │
+│  │ /REST API│    │  (Orchestrator)│    │                  │   │
+│  └──────────┘    └──────┬───────┘    └────────┬─────────┘   │
+│                         │                      │             │
+│         ┌───────────────┼──────────────────────┼──────┐      │
+│         ▼               ▼                      ▼      ▼      │
+│   ┌──────────┐  ┌────────────┐  ┌──────────┐  ┌────────┐   │
+│   │ Planner  │  │ CodeWriter │  │ Reviewer  │  │ Fixer  │   │
+│   │  Agent   │  │   Agent    │  │  Agent    │  │ Agent  │   │
+│   └──────────┘  └────────────┘  └──────────┘  └────────┘   │
+│         │               │              │           │         │
+│         └───────────────┴──────────────┴───────────┘         │
+│                         │                                    │
+│              ┌──────────┴──────────┐                         │
+│              ▼                     ▼                         │
+│     ┌──────────────┐     ┌──────────────┐                   │
+│     │   Tool Layer  │     │ Memory Layer │                   │
+│     │ ─ Compiler    │     │ ─ Episodic   │                   │
+│     │ ─ Linter      │     │   (pgvector) │                   │
+│     │ ─ Test Runner │     │ ─ Semantic   │                   │
+│     │ ─ File I/O    │     │   (Neo4j)    │                   │
+│     │ ─ Web Search  │     │ ─ Session    │                   │
+│     └──────────────┘     └──────────────┘                   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 2. Temel Veri Modelleri (Kotlin Sealed Classes)
+
+```kotlin
+// ═══════════════════════════════════════════════
+// Core State Machine - Tüm ajanların ortak dili
+// ═══════════════════════════════════════════════
+
+/**
+ * Bir ajan döngüsündeki olası adımlar.
+ * Sealed class sayesinde `when` bloğu exhaustive olur — 
+ * yeni bir adım eklediğinde compiler seni uyarır.
+ */
+sealed class AgentStep {
+    /** LLM düşünüyor, reasoning üretiyor */
+    data class Think(
+        val thought: String,
+        val confidence: Double = 0.0  // 0.0 - 1.0
+    ) : AgentStep()
+    
+    /** Bir araç çağrılacak */
+    data class Act(
+        val toolName: String,
+        val toolInput: Map<String, Any>,
+        val reasoning: String  // Neden bu aracı seçti
+    ) : AgentStep()
+    
+    /** Araç sonucu geri döndü */
+    data class Observe(
+        val toolName: String,
+        val result: ToolResult,
+        val durationMs: Long
+    ) : AgentStep()
+    
+    /** Sonuç hazır, döngü bitti */
+    data class Answer(
+        val content: String,
+        val artifacts: List<CodeArtifact> = emptyList(),
+        val metadata: AnswerMetadata? = null
+    ) : AgentStep()
+    
+    /** Hata oluştu, recovery gerekiyor */
+    data class Error(
+        val message: String,
+        val recoverable: Boolean,
+        val suggestedAction: String? = null
+    ) : AgentStep()
+    
+    /** Başka bir ajana devret */
+    data class Delegate(
+        val targetAgent: AgentRole,
+        val context: DelegationContext
+    ) : AgentStep()
+}
+
+// ═══════════════════════════════════════════════
+// Agent Rolleri
+// ═══════════════════════════════════════════════
+
+enum class AgentRole {
+    PLANNER,       // Görevi alt görevlere böler
+    CODE_WRITER,   // Kod üretir
+    REVIEWER,      // Kodu inceler, hata bulur
+    FIXER,         // Hataları düzeltir
+    TESTER,        // Test yazar ve çalıştırır
+    RESEARCHER     // Dokümantasyon / API araştırır
+}
+
+// ═══════════════════════════════════════════════
+// Tool System
+// ═══════════════════════════════════════════════
+
+sealed class ToolResult {
+    data class Success(val output: String, val data: Any? = null) : ToolResult()
+    data class Failure(val error: String, val retryable: Boolean) : ToolResult()
+}
+
+data class CodeArtifact(
+    val filename: String,
+    val language: String,
+    val content: String,
+    val version: Int = 1
+)
+
+data class AnswerMetadata(
+    val totalSteps: Int,
+    val toolsUsed: List<String>,
+    val totalDurationMs: Long,
+    val agentsInvolved: List<AgentRole>
+)
+```
+
+---
+
+## 3. ReAct Döngüsü — Tek Ajan Çekirdeği
+
+Her ajan, ReAct pattern'ini temel alır. Bu, tüm sistemin **atom birimi**dir.
+
+```kotlin
+// ═══════════════════════════════════════════════
+// ReAct Loop - Her ajanın kalbi
+// ═══════════════════════════════════════════════
+
+class ReActAgent(
+    private val role: AgentRole,
+    private val llmClient: LLMClient,
+    private val tools: Map<String, Tool>,
+    private val memory: MemoryLayer,
+    private val config: AgentConfig = AgentConfig()
+) {
+    data class AgentConfig(
+        val maxIterations: Int = 10,
+        val maxRetries: Int = 3,
+        val thinkingBudget: Int = 5,     // Kaç "düşünme" adımı
+        val confidenceThreshold: Double = 0.7
+    )
+    
+    /**
+     * Ana çalıştırma döngüsü. 
+     * suspend fun olması sayesinde her adım non-blocking.
+     */
+    suspend fun execute(task: AgentTask): AgentStep.Answer {
+        val trajectory = mutableListOf<AgentStep>()
+        var iteration = 0
+        
+        // 1) Hafızadan ilgili bağlamı çek
+        val episodicContext = memory.recallSimilar(task.description, limit = 5)
+        val semanticContext = memory.queryGraph(task.entities())
+        
+        // 2) Sistem promptunu oluştur (role-specific)
+        val systemPrompt = buildSystemPrompt(role, episodicContext, semanticContext)
+        
+        while (iteration < config.maxIterations) {
+            iteration++
+            
+            // 3) LLM'e mevcut trajectory'yi gönder → sonraki adımı al
+            val nextStep = llmClient.reason(
+                system = systemPrompt,
+                trajectory = trajectory,
+                availableTools = tools.keys.toList()
+            )
+            
+            trajectory.add(nextStep)
+            
+            when (nextStep) {
+                is AgentStep.Think -> {
+                    // Düşünce kaydedildi, döngü devam
+                    continue
+                }
+                
+                is AgentStep.Act -> {
+                    // Aracı çalıştır
+                    val tool = tools[nextStep.toolName]
+                        ?: throw AgentException("Unknown tool: ${nextStep.toolName}")
+                    
+                    val result = withTimeoutOrNull(30_000) {
+                        tool.execute(nextStep.toolInput)
+                    } ?: ToolResult.Failure("Tool timeout after 30s", retryable = true)
+                    
+                    val observe = AgentStep.Observe(
+                        toolName = nextStep.toolName,
+                        result = result,
+                        durationMs = measureTimeMillis { /* already measured */ }
+                    )
+                    trajectory.add(observe)
+                }
+                
+                is AgentStep.Answer -> {
+                    // Episodic hafızaya kaydet
+                    memory.storeEpisode(
+                        task = task,
+                        trajectory = trajectory,
+                        outcome = nextStep
+                    )
+                    return nextStep
+                }
+                
+                is AgentStep.Delegate -> {
+                    // Bu adım Multi-Agent katmanında yakalanır
+                    throw DelegationException(nextStep)
+                }
+                
+                is AgentStep.Error -> {
+                    if (!nextStep.recoverable) throw AgentException(nextStep.message)
+                    // Recoverable → trajectory'ye ekle, LLM recovery denesin
+                    continue
+                }
+                
+                is AgentStep.Observe -> {
+                    // LLM doğrudan Observe üretmez, Act sonrası biz ekleriz
+                    continue
+                }
+            }
+        }
+        
+        throw AgentException("Max iterations ($config.maxIterations) exceeded")
+    }
+}
+```
+
+---
+
+## 4. Multi-Agent Orkestrasyon
+
+Meta-Controller, gelen görevi analiz edip doğru ajanlara yönlendirir.
+
+```kotlin
+// ═══════════════════════════════════════════════
+// Multi-Agent Orchestrator
+// ═══════════════════════════════════════════════
+
+class MetaController(
+    private val agents: Map<AgentRole, ReActAgent>,
+    private val llmClient: LLMClient,
+    private val memory: MemoryLayer
+) {
+    /**
+     * Kullanıcı isteğini alır → Plan oluşturur → 
+     * Ajanları sırayla/paralel çalıştırır → Sonuç döner
+     */
+    suspend fun process(userRequest: String, sessionId: String): AgentResponse {
+        
+        // ═══ ADIM 1: PLANLAMA ═══
+        val plan = planTask(userRequest)
+        
+        // ═══ ADIM 2: YÜRÜTME ═══
+        val results = mutableMapOf<String, AgentStep.Answer>()
+        
+        for (step in plan.steps) {
+            val agent = agents[step.assignedAgent]
+                ?: throw IllegalStateException("No agent for role: ${step.assignedAgent}")
+            
+            val task = AgentTask(
+                description = step.description,
+                context = buildContext(results, step.dependsOn),
+                constraints = step.constraints
+            )
+            
+            try {
+                val result = agent.execute(task)
+                results[step.id] = result
+                
+                // ═══ ADIM 3: DOĞRULAMA (PEV) ═══
+                if (step.requiresVerification) {
+                    val verification = verify(step, result)
+                    if (!verification.passed) {
+                        // Retry veya Fixer'a gönder
+                        val fixed = handleVerificationFailure(step, result, verification)
+                        results[step.id] = fixed
+                    }
+                }
+            } catch (e: DelegationException) {
+                // Ajan başka bir ajana devretmek istiyor
+                val delegatedResult = agents[e.delegation.targetAgent]
+                    ?.execute(AgentTask.fromDelegation(e.delegation))
+                    ?: throw AgentException("Delegation target not found")
+                results[step.id] = delegatedResult
+            }
+        }
+        
+        // ═══ ADIM 4: SONUÇ BİRLEŞTİRME ═══
+        return synthesizeResults(plan, results)
+    }
+    
+    /**
+     * LLM kullanarak görevi alt adımlara böler.
+     * Her adım hangi ajana gideceğini ve bağımlılıklarını belirtir.
+     */
+    private suspend fun planTask(request: String): ExecutionPlan {
+        val planResponse = llmClient.chat(
+            system = PLANNER_SYSTEM_PROMPT,
+            user = """
+                Kullanıcı İsteği: $request
+                
+                Mevcut Ajanlar: ${agents.keys.joinToString()}
+                
+                JSON formatında bir yürütme planı oluştur:
+                {
+                  "steps": [
+                    {
+                      "id": "step_1",
+                      "description": "...",
+                      "assignedAgent": "CODE_WRITER",
+                      "dependsOn": [],
+                      "requiresVerification": true,
+                      "constraints": ["Kotlin", "coroutines"]
+                    }
+                  ]
+                }
+            """.trimIndent()
+        )
+        return Json.decodeFromString<ExecutionPlan>(planResponse)
+    }
+}
+
+// ═══════════════════════════════════════════════
+// Execution Plan modeli
+// ═══════════════════════════════════════════════
+
+@Serializable
+data class ExecutionPlan(
+    val steps: List<PlanStep>
+)
+
+@Serializable
+data class PlanStep(
+    val id: String,
+    val description: String,
+    val assignedAgent: AgentRole,
+    val dependsOn: List<String> = emptyList(),
+    val requiresVerification: Boolean = true,
+    val constraints: List<String> = emptyList()
+)
+```
+
+---
+
+## 5. PEV — Plan, Execute, Verify Döngüsü
+
+```kotlin
+// ═══════════════════════════════════════════════
+// Verification Gate
+// ═══════════════════════════════════════════════
+
+class VerificationGate(
+    private val llmClient: LLMClient,
+    private val tools: VerificationTools
+) {
+    data class VerificationResult(
+        val passed: Boolean,
+        val score: Double,          // 0.0 - 1.0
+        val issues: List<Issue>,
+        val suggestions: List<String>
+    )
+    
+    data class Issue(
+        val severity: Severity,     // CRITICAL, WARNING, INFO
+        val description: String,
+        val location: String?       // dosya:satır
+    )
+    
+    enum class Severity { CRITICAL, WARNING, INFO }
+    
+    /**
+     * Üretilen kodu çok katmanlı olarak doğrular:
+     * 1) Statik analiz (lint, compile check)
+     * 2) Mantıksal doğruluk (LLM-as-Judge)
+     * 3) Test çalıştırma (varsa)
+     */
+    suspend fun verify(step: PlanStep, result: AgentStep.Answer): VerificationResult {
+        val issues = mutableListOf<Issue>()
+        
+        // ── Katman 1: Statik Analiz ──
+        for (artifact in result.artifacts) {
+            when (artifact.language.lowercase()) {
+                "kotlin" -> {
+                    val lintResult = tools.kotlinLint(artifact.content)
+                    issues.addAll(lintResult.issues)
+                    
+                    val compileResult = tools.kotlinCompileCheck(artifact.content)
+                    if (!compileResult.success) {
+                        issues.add(Issue(
+                            Severity.CRITICAL,
+                            "Derleme hatası: ${compileResult.error}",
+                            artifact.filename
+                        ))
+                    }
+                }
+                "java" -> {
+                    val lintResult = tools.javaLint(artifact.content)
+                    issues.addAll(lintResult.issues)
+                }
+            }
+        }
+        
+        // ── Katman 2: LLM-as-Judge ──
+        val judgeScore = llmClient.chat(
+            system = """
+                Sen bir kod review uzmanısın. Verilen kodu şu kriterlere göre puanla:
+                1. Doğruluk (görevi yerine getiriyor mu?)
+                2. Kotlin idiomatik kullanım
+                3. Hata yönetimi
+                4. Performans
+                
+                JSON döndür: { "score": 0.0-1.0, "issues": [...], "suggestions": [...] }
+            """.trimIndent(),
+            user = """
+                Görev: ${step.description}
+                Kısıtlar: ${step.constraints}
+                Üretilen Kod:
+                ${result.artifacts.joinToString("\n---\n") { it.content }}
+            """.trimIndent()
+        )
+        
+        val judgeResult = Json.decodeFromString<JudgeResponse>(judgeScore)
+        issues.addAll(judgeResult.issues.map { 
+            Issue(Severity.WARNING, it, null) 
+        })
+        
+        // ── Katman 3: Test Çalıştırma ──
+        val testArtifacts = result.artifacts.filter { it.filename.contains("Test") }
+        if (testArtifacts.isNotEmpty()) {
+            val testResult = tools.runTests(testArtifacts)
+            if (!testResult.allPassed) {
+                issues.add(Issue(
+                    Severity.CRITICAL,
+                    "Test başarısız: ${testResult.failures.joinToString()}",
+                    null
+                ))
+            }
+        }
+        
+        val hasCritical = issues.any { it.severity == Severity.CRITICAL }
+        
+        return VerificationResult(
+            passed = !hasCritical && judgeResult.score >= 0.7,
+            score = judgeResult.score,
+            issues = issues,
+            suggestions = judgeResult.suggestions
+        )
+    }
+}
+```
+
+---
+
+## 6. Memory Layer — Episodic + Semantic Hafıza
+
+```kotlin
+// ═══════════════════════════════════════════════
+// Dual Memory System
+// ═══════════════════════════════════════════════
+
+interface MemoryLayer {
+    /** Vektör benzerliği ile geçmiş episodları bul */
+    suspend fun recallSimilar(query: String, limit: Int = 5): List<Episode>
+    
+    /** Graf üzerinde entity/relation sorgusu */
+    suspend fun queryGraph(entities: List<String>): GraphContext
+    
+    /** Yeni bir çalışma episodunu kaydet */
+    suspend fun storeEpisode(task: AgentTask, trajectory: List<AgentStep>, outcome: AgentStep.Answer)
+    
+    /** Semantik grafa bilgi ekle */
+    suspend fun updateGraph(facts: List<Fact>)
+}
+
+class DualMemory(
+    private val vectorStore: PgVectorStore,   // Episodic — pgvector
+    private val graphStore: Neo4jClient,       // Semantic — Neo4j
+    private val embeddingClient: EmbeddingClient
+) : MemoryLayer {
+    
+    // ── Episodic Memory (pgvector) ──
+    // "Geçen sefer RecyclerView adapter yazarken DiffUtil kullanmıştık
+    //  ve review'dan 0.9 puan almıştık" → benzer görevde tekrar kullan
+    
+    override suspend fun recallSimilar(query: String, limit: Int): List<Episode> {
+        val embedding = embeddingClient.embed(query)
+        return vectorStore.query(
+            """
+            SELECT task_description, trajectory_summary, outcome_score, artifacts
+            FROM episodes 
+            ORDER BY embedding <=> $1::vector
+            LIMIT $2
+            """,
+            embedding, limit
+        ).map { it.toEpisode() }
+    }
+    
+    override suspend fun storeEpisode(
+        task: AgentTask, 
+        trajectory: List<AgentStep>, 
+        outcome: AgentStep.Answer
+    ) {
+        val summary = summarizeTrajectory(trajectory)
+        val embedding = embeddingClient.embed(task.description)
+        
+        vectorStore.execute(
+            """
+            INSERT INTO episodes (task_description, trajectory_summary, 
+                                  outcome_score, artifacts, embedding, created_at)
+            VALUES ($1, $2, $3, $4, $5::vector, NOW())
+            """,
+            task.description, summary, calculateScore(outcome),
+            Json.encodeToString(outcome.artifacts), embedding
+        )
+    }
+    
+    // ── Semantic Memory (Neo4j) ──
+    // "Kullanıcı MVVM tercih ediyor, Room DB kullanıyor, 
+    //  min SDK 26 hedefliyor" → kalıcı bilgi grafiği
+    
+    override suspend fun queryGraph(entities: List<String>): GraphContext {
+        val cypher = """
+            MATCH (e:Entity)-[r]->(related)
+            WHERE e.name IN ${'$'}entities
+            RETURN e.name, type(r), related.name, r.properties
+            LIMIT 50
+        """
+        val records = graphStore.query(cypher, mapOf("entities" to entities))
+        return GraphContext(
+            facts = records.map { Fact(it["e.name"], it["type(r)"], it["related.name"]) },
+            entities = entities
+        )
+    }
+    
+    override suspend fun updateGraph(facts: List<Fact>) {
+        for (fact in facts) {
+            graphStore.execute(
+                """
+                MERGE (a:Entity {name: ${'$'}subject})
+                MERGE (b:Entity {name: ${'$'}object})
+                MERGE (a)-[r:${fact.relation}]->(b)
+                SET r.updatedAt = datetime()
+                """,
+                mapOf("subject" to fact.subject, "object" to fact.objectEntity)
+            )
+        }
+    }
+}
+
+data class Episode(
+    val taskDescription: String,
+    val trajectorySummary: String,
+    val outcomeScore: Double,
+    val artifacts: List<CodeArtifact>
+)
+
+data class Fact(
+    val subject: String,
+    val relation: String,
+    val objectEntity: String
+)
+
+data class GraphContext(
+    val facts: List<Fact>,
+    val entities: List<String>
+)
+```
+
+---
+
+## 7. Tool Katmanı — Geliştirici Araçları
+
+```kotlin
+// ═══════════════════════════════════════════════
+// Tool Interface + Implementations
+// ═══════════════════════════════════════════════
+
+interface Tool {
+    val name: String
+    val description: String
+    val parameters: JsonSchema
+    suspend fun execute(input: Map<String, Any>): ToolResult
+}
+
+/** Kotlin kodunu derleyip hata kontrolü yapar */
+class KotlinCompilerTool : Tool {
+    override val name = "kotlin_compile"
+    override val description = "Kotlin kodunu derler ve hataları döndürür"
+    override val parameters = jsonSchema { 
+        property("code", JsonType.STRING, "Derlenecek Kotlin kodu")
+        property("dependencies", JsonType.ARRAY, "Gradle bağımlılıkları")
+    }
+    
+    override suspend fun execute(input: Map<String, Any>): ToolResult {
+        val code = input["code"] as String
+        // Sandbox'ta derleme (Docker container veya Kotlin Scripting API)
+        val result = KotlinScriptEngine.compile(code)
+        return if (result.success) {
+            ToolResult.Success("Derleme başarılı", result.bytecode)
+        } else {
+            ToolResult.Failure(result.errors.joinToString("\n"), retryable = true)
+        }
+    }
+}
+
+/** Dosya okuma/yazma işlemleri (sandbox içinde) */
+class FileSystemTool : Tool {
+    override val name = "file_system"
+    override val description = "Proje dosyalarını oku, yaz, listele"
+    override val parameters = jsonSchema {
+        property("action", JsonType.STRING, "read | write | list | delete")
+        property("path", JsonType.STRING, "Dosya yolu")
+        property("content", JsonType.STRING, "Yazılacak içerik (write için)")
+    }
+    
+    override suspend fun execute(input: Map<String, Any>): ToolResult {
+        val action = input["action"] as String
+        val path = (input["path"] as String).sanitizePath() // Path traversal koruması
+        return when (action) {
+            "read" -> ToolResult.Success(File(sandboxDir, path).readText())
+            "write" -> {
+                File(sandboxDir, path).apply { 
+                    parentFile.mkdirs()
+                    writeText(input["content"] as String) 
+                }
+                ToolResult.Success("Dosya yazıldı: $path")
+            }
+            "list" -> ToolResult.Success(
+                File(sandboxDir, path).walkTopDown()
+                    .filter { it.isFile }
+                    .joinToString("\n") { it.relativeTo(sandboxDir).path }
+            )
+            else -> ToolResult.Failure("Bilinmeyen aksiyon: $action", false)
+        }
+    }
+}
+
+/** Web'de dokümantasyon araması */
+class WebSearchTool(private val httpClient: HttpClient) : Tool {
+    override val name = "web_search"
+    override val description = "Kotlin/Android dokümantasyonu ve API referansları ara"
+    override val parameters = jsonSchema {
+        property("query", JsonType.STRING, "Arama sorgusu")
+    }
+    
+    override suspend fun execute(input: Map<String, Any>): ToolResult {
+        val query = input["query"] as String
+        val response = httpClient.get("https://api.tavily.com/search") {
+            parameter("query", "$query Kotlin Android")
+            parameter("max_results", 5)
+        }
+        return ToolResult.Success(response.bodyAsText())
+    }
+}
+
+/** Test çalıştırma (JUnit) */
+class TestRunnerTool : Tool {
+    override val name = "run_tests"
+    override val description = "JUnit testlerini çalıştır ve sonuçları raporla"
+    override val parameters = jsonSchema {
+        property("test_code", JsonType.STRING, "Test kodu")
+        property("source_code", JsonType.STRING, "Test edilecek kaynak kod")
+    }
+    
+    override suspend fun execute(input: Map<String, Any>): ToolResult {
+        // Docker sandbox'ta Gradle test çalıştır
+        val result = SandboxRunner.runGradleTest(
+            sourceCode = input["source_code"] as String,
+            testCode = input["test_code"] as String
+        )
+        return if (result.allPassed) {
+            ToolResult.Success("✅ ${result.passCount}/${result.totalCount} test geçti")
+        } else {
+            ToolResult.Failure(
+                "❌ ${result.failCount} test başarısız:\n${result.failures.joinToString("\n")}",
+                retryable = true
+            )
+        }
+    }
+}
+```
+
+---
+
+## 8. KTOR Server — API Katmanı
+
+```kotlin
+// ═══════════════════════════════════════════════
+// KTOR Application Setup
+// ═══════════════════════════════════════════════
+
+fun Application.module() {
+    install(ContentNegotiation) { json() }
+    install(WebSockets) { pingPeriod = Duration.ofSeconds(15) }
+    install(Authentication) { bearer("api-key") { /* ... */ } }
+    
+    val metaController = MetaController(
+        agents = mapOf(
+            AgentRole.PLANNER to createPlannerAgent(),
+            AgentRole.CODE_WRITER to createCodeWriterAgent(),
+            AgentRole.REVIEWER to createReviewerAgent(),
+            AgentRole.FIXER to createFixerAgent(),
+            AgentRole.TESTER to createTesterAgent(),
+            AgentRole.RESEARCHER to createResearcherAgent()
+        ),
+        llmClient = AnthropicClient(apiKey = System.getenv("ANTHROPIC_API_KEY")),
+        memory = DualMemory(pgVector, neo4j, embeddingClient)
+    )
+    
+    routing {
+        // REST endpoint — basit istek/cevap
+        authenticate("api-key") {
+            post("/api/v1/agent") {
+                val request = call.receive<AgentRequest>()
+                val response = metaController.process(
+                    userRequest = request.message,
+                    sessionId = request.sessionId
+                )
+                call.respond(response)
+            }
+        }
+        
+        // WebSocket — gerçek zamanlı streaming
+        authenticate("api-key") {
+            webSocket("/ws/agent") {
+                val sessionId = call.parameters["session"] ?: generateSessionId()
+                
+                for (frame in incoming) {
+                    if (frame is Frame.Text) {
+                        val request = Json.decodeFromString<AgentRequest>(frame.readText())
+                        
+                        // Streaming: her adımı anında gönder
+                        metaController.processStreaming(
+                            userRequest = request.message,
+                            sessionId = sessionId
+                        ) { step ->
+                            send(Frame.Text(Json.encodeToString(step.toStreamEvent())))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Stream event modeli
+@Serializable
+sealed class StreamEvent {
+    @Serializable data class Thinking(val thought: String) : StreamEvent()
+    @Serializable data class ToolCall(val tool: String, val input: String) : StreamEvent()
+    @Serializable data class ToolResult(val tool: String, val output: String) : StreamEvent()
+    @Serializable data class CodeGenerated(val artifact: CodeArtifact) : StreamEvent()
+    @Serializable data class PlanUpdate(val step: String, val status: String) : StreamEvent()
+    @Serializable data class Done(val answer: String, val metadata: AnswerMetadata) : StreamEvent()
+}
+```
+
+---
+
+## 9. LLM Client — Anthropic API Entegrasyonu
+
+```kotlin
+// ═══════════════════════════════════════════════
+// LLM Client (Anthropic Claude)
+// ═══════════════════════════════════════════════
+
+class AnthropicClient(
+    private val apiKey: String,
+    private val model: String = "claude-sonnet-4-5-20250929",
+    private val httpClient: HttpClient = HttpClient(CIO) {
+        install(ContentNegotiation) { json() }
+        defaultRequest {
+            header("x-api-key", apiKey)
+            header("anthropic-version", "2023-06-01")
+            contentType(ContentType.Application.Json)
+        }
+    }
+) : LLMClient {
+    
+    override suspend fun reason(
+        system: String,
+        trajectory: List<AgentStep>,
+        availableTools: List<String>
+    ): AgentStep {
+        val messages = trajectory.toAnthropicMessages()
+        
+        val response = httpClient.post("https://api.anthropic.com/v1/messages") {
+            setBody(mapOf(
+                "model" to model,
+                "max_tokens" to 4096,
+                "system" to system,
+                "messages" to messages,
+                "tools" to availableTools.map { it.toToolDefinition() }
+            ))
+        }
+        
+        val result = response.body<AnthropicResponse>()
+        return result.toAgentStep()
+    }
+    
+    override suspend fun chat(system: String, user: String): String {
+        val response = httpClient.post("https://api.anthropic.com/v1/messages") {
+            setBody(mapOf(
+                "model" to model,
+                "max_tokens" to 4096,
+                "system" to system,
+                "messages" to listOf(mapOf("role" to "user", "content" to user))
+            ))
+        }
+        return response.body<AnthropicResponse>().content.first().text
+    }
+}
+```
+
+---
+
+## 10. Örnek Akış: "Kotlin'de bir REST client yaz"
+
+```
+Kullanıcı: "KTOR kullanarak GitHub API'den repo listesi çeken bir client yaz"
+  │
+  ▼
+Meta-Controller → Planner Agent
+  │  Plan:
+  │  ├─ step_1: RESEARCHER → "KTOR client API ve GitHub REST API araştır"
+  │  ├─ step_2: CODE_WRITER → "GitHubClient sınıfını yaz" (depends: step_1)
+  │  ├─ step_3: TESTER → "Unit test yaz" (depends: step_2)
+  │  └─ step_4: REVIEWER → "Kodu incele" (depends: step_2, step_3)
+  │
+  ▼
+step_1: Researcher Agent (ReAct döngüsü)
+  │  Think: "KTOR client setup ve GitHub /user/repos endpoint'ini araştırmalıyım"
+  │  Act: web_search("KTOR HttpClient GitHub API Kotlin")
+  │  Observe: [KTOR docs, GitHub API docs]
+  │  Answer: "KTOR CIO engine + ContentNegotiation + Bearer auth gerekli"
+  │
+  ▼
+step_2: CodeWriter Agent (ReAct + Memory)
+  │  [Memory'den]: "Benzer görevde daha önce HttpClient extension kullanmıştık → 0.85 skor"
+  │  Think: "Extension function pattern kullanayım, data class + sealed class hata yönetimi"
+  │  Act: file_write → GitHubClient.kt
+  │  Act: kotlin_compile → Derleme kontrolü
+  │  Answer: GitHubClient.kt + GitHubModels.kt
+  │
+  ▼
+step_3: Tester Agent
+  │  Act: file_write → GitHubClientTest.kt (MockEngine ile)
+  │  Act: run_tests → 5/5 geçti ✅
+  │
+  ▼
+step_4: Reviewer Agent + Verification Gate
+  │  LLM-as-Judge: 0.88 skor
+  │  Issues: [WARNING: "Rate limiting eksik"]
+  │  → FIXER Agent → Rate limiter eklendi
+  │  → Re-verify: 0.95 skor ✅
+  │
+  ▼
+Sonuç → Kullanıcıya stream edilir
+```
+
+---
+
+## 11. Proje Yapısı
+
+```
+agent-backend/
+├── build.gradle.kts
+├── src/main/kotlin/
+│   ├── Application.kt              ← KTOR setup
+│   ├── core/
+│   │   ├── AgentStep.kt            ← Sealed class state machine
+│   │   ├── ReActAgent.kt           ← Tek ajan çekirdeği
+│   │   ├── MetaController.kt       ← Multi-agent orchestrator
+│   │   └── VerificationGate.kt     ← PEV doğrulama
+│   ├── agents/
+│   │   ├── PlannerAgent.kt
+│   │   ├── CodeWriterAgent.kt
+│   │   ├── ReviewerAgent.kt
+│   │   ├── FixerAgent.kt
+│   │   ├── TesterAgent.kt
+│   │   └── ResearcherAgent.kt
+│   ├── tools/
+│   │   ├── Tool.kt                 ← Tool interface
+│   │   ├── KotlinCompilerTool.kt
+│   │   ├── FileSystemTool.kt
+│   │   ├── WebSearchTool.kt
+│   │   └── TestRunnerTool.kt
+│   ├── memory/
+│   │   ├── MemoryLayer.kt          ← Interface
+│   │   ├── DualMemory.kt           ← pgvector + Neo4j impl
+│   │   ├── PgVectorStore.kt
+│   │   └── Neo4jClient.kt
+│   ├── llm/
+│   │   ├── LLMClient.kt            ← Interface
+│   │   └── AnthropicClient.kt      ← Claude API impl
+│   ├── models/
+│   │   ├── AgentRequest.kt
+│   │   ├── AgentResponse.kt
+│   │   ├── ExecutionPlan.kt
+│   │   └── StreamEvent.kt
+│   └── routes/
+│       ├── AgentRoutes.kt
+│       └── WebSocketRoutes.kt
+├── src/test/kotlin/
+│   └── ...
+└── docker/
+    ├── docker-compose.yml           ← PostgreSQL + Neo4j + App
+    └── sandbox/
+        └── Dockerfile               ← Kod çalıştırma sandbox'u
+```
+
+---
+
+## 12. Bağımlılıklar (build.gradle.kts)
+
+```kotlin
+dependencies {
+    // KTOR Server
+    implementation("io.ktor:ktor-server-core:2.3.+")
+    implementation("io.ktor:ktor-server-netty:2.3.+")
+    implementation("io.ktor:ktor-server-websockets:2.3.+")
+    implementation("io.ktor:ktor-server-content-negotiation:2.3.+")
+    implementation("io.ktor:ktor-server-auth:2.3.+")
+    implementation("io.ktor:ktor-serialization-kotlinx-json:2.3.+")
+    
+    // KTOR Client (LLM API çağrıları için)
+    implementation("io.ktor:ktor-client-core:2.3.+")
+    implementation("io.ktor:ktor-client-cio:2.3.+")
+    implementation("io.ktor:ktor-client-content-negotiation:2.3.+")
+    
+    // Database
+    implementation("org.postgresql:postgresql:42.7.+")
+    implementation("com.pgvector:pgvector:0.1.+")          // Episodic memory
+    implementation("org.neo4j.driver:neo4j-java-driver:5.+") // Semantic memory
+    
+    // Serialization
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.+")
+    
+    // Coroutines
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.+")
+    
+    // Kotlin Scripting (sandbox compile)
+    implementation("org.jetbrains.kotlin:kotlin-scripting-jsr223:1.9.+")
+    
+    // Test
+    testImplementation("io.ktor:ktor-server-test-host:2.3.+")
+    testImplementation("org.jetbrains.kotlin:kotlin-test:1.9.+")
+}
+```
+
+---
+
+## 13. Uygulama Yol Haritası
+
+| Hafta | Milestone | Tamamlanacak Bileşenler |
+|-------|-----------|------------------------|
+| **1-2** | 🟢 ReAct Çekirdeği | `AgentStep` sealed class, `ReActAgent`, `AnthropicClient`, basit bir tool (file_system) |
+| **3** | 🟡 Tool Layer | `KotlinCompilerTool`, `WebSearchTool`, `TestRunnerTool` |
+| **4-5** | 🟠 Multi-Agent | `MetaController`, Planner/CodeWriter/Reviewer ajanları, streaming WebSocket |
+| **6** | 🔴 PEV | `VerificationGate`, LLM-as-Judge, Fixer döngüsü |
+| **7-8** | 🟣 Memory | pgvector episodic store, Neo4j semantic graph, hafıza entegrasyonu |
+| **9-10** | ⚫ Production | Docker compose, rate limiting, observability (OpenTelemetry), load test |
+
+---
+
+## 14. Kritik Tasarım Kararları
+
+**Neden LangGraph değil, kendi state machine?**
+Kotlin'in `sealed class` + `when` + `coroutines` üçlüsü, LangGraph'ın yaptığı her şeyi type-safe ve compile-time checked olarak yapmanı sağlıyor. Python'da runtime'da keşfettiğin hataları Kotlin'de derleme aşamasında yakalarsın.
+
+**Neden pgvector + Neo4j (iki DB)?**
+Episodic memory (geçmiş konuşmalar) vektör benzerliği gerektirir → pgvector yeterli. Semantic memory (entity-relation bilgisi) graf traversal gerektirir → Neo4j doğal fit. Tek DB ile ikisini de yapmaya çalışmak her zaman compromise olur.
+
+**Neden Anthropic Claude?**
+Function calling (tool use) desteği native, Kotlin JSON serialization ile doğrudan uyumlu. Structured output garantisi, ajan güvenilirliği için kritik.
+
+**Sandbox neden önemli?**
+Ajan ürettiği kodu çalıştırabilmeli (compile, test). Bu kod güvenilmez → Docker container içinde izole sandbox şart. Host sisteme erişim kesinlikle yok.

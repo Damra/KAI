@@ -3,9 +3,7 @@ package com.kai
 import com.kai.agents.AgentFactory
 import com.kai.core.MetaController
 import com.kai.core.VerificationGate
-import com.kai.llm.AnthropicClient
-import com.kai.llm.MockEmbeddingClient
-import com.kai.llm.VoyageEmbeddingClient
+import com.kai.llm.*
 import com.kai.memory.DualMemory
 import com.kai.memory.Neo4jStore
 import com.kai.memory.PgVectorStore
@@ -102,19 +100,51 @@ fun Application.module() {
         install(io.ktor.client.plugins.contentnegotiation.ContentNegotiation) {
             json(Json { ignoreUnknownKeys = true })
         }
+        install(io.ktor.client.plugins.HttpTimeout) {
+            requestTimeoutMillis = 120_000
+            connectTimeoutMillis = 10_000
+            socketTimeoutMillis = 120_000
+        }
     }
 
-    val anthropicClient = AnthropicClient(
-        httpClient = httpClient,
-        apiKey = config.anthropicApiKey,
-        model = config.llmModel
-    )
+    // ── LLM Client: Ollama (lokal) veya Anthropic (cloud) ──
+    val llmClient: LLMClient = when {
+        config.llmProvider == "ollama" || (config.anthropicApiKey.isBlank() && isOllamaRunning(config.ollamaUrl)) -> {
+            logger.info("Using Ollama (${config.ollamaModel}) at ${config.ollamaUrl}")
+            OllamaClient(
+                httpClient = httpClient,
+                baseUrl = config.ollamaUrl,
+                model = config.ollamaModel
+            )
+        }
+        config.anthropicApiKey.isNotBlank() -> {
+            logger.info("Using Anthropic (${config.llmModel})")
+            AnthropicClient(
+                httpClient = httpClient,
+                apiKey = config.anthropicApiKey,
+                model = config.llmModel
+            )
+        }
+        else -> {
+            logger.warn("No LLM configured! Set ANTHROPIC_API_KEY or install Ollama.")
+            logger.warn("Install Ollama: https://ollama.com -> ollama pull qwen2.5-coder:7b -> ollama serve")
+            AnthropicClient(httpClient = httpClient, apiKey = "", model = config.llmModel)
+        }
+    }
 
-    val embeddingClient = if (config.voyageApiKey.isNotBlank()) {
-        VoyageEmbeddingClient(httpClient, config.voyageApiKey)
-    } else {
-        logger.warn("VOYAGE_API_KEY not set, using MockEmbeddingClient")
-        MockEmbeddingClient()
+    // ── Embedding Client ──
+    val embeddingClient: EmbeddingClient = when {
+        config.llmProvider == "ollama" || (config.voyageApiKey.isBlank() && isOllamaRunning(config.ollamaUrl)) -> {
+            logger.info("Using Ollama embeddings (nomic-embed-text)")
+            OllamaEmbeddingClient(httpClient, config.ollamaUrl)
+        }
+        config.voyageApiKey.isNotBlank() -> {
+            VoyageEmbeddingClient(httpClient, config.voyageApiKey)
+        }
+        else -> {
+            logger.warn("No embedding provider, using MockEmbeddingClient")
+            MockEmbeddingClient()
+        }
     }
 
     // Database connections (graceful fallback)
@@ -123,7 +153,7 @@ fun Application.module() {
     val sandboxDir = File(config.sandboxPath).also { it.mkdirs() }
 
     val agentFactory = AgentFactory(
-        llmClient = anthropicClient,
+        llmClient = llmClient,
         memory = memory,
         httpClient = httpClient,
         sandboxDir = sandboxDir,
@@ -133,14 +163,14 @@ fun Application.module() {
     val agents = agentFactory.createAll()
 
     val verificationGate = VerificationGate(
-        llmClient = anthropicClient,
+        llmClient = llmClient,
         compilerTool = KotlinCompilerTool(sandboxDir),
         testRunnerTool = TestRunnerTool(sandboxDir)
     )
 
     val metaController = MetaController(
         agents = agents,
-        llmClient = anthropicClient,
+        llmClient = llmClient,
         memory = memory,
         verificationGate = verificationGate
     )
@@ -250,8 +280,11 @@ private class InMemoryMemoryLayer : com.kai.memory.MemoryLayer {
  * Uygulama konfigürasyonu — environment variable'lardan okunur.
  */
 data class AppConfig(
+    val llmProvider: String,
     val anthropicApiKey: String,
     val llmModel: String,
+    val ollamaUrl: String,
+    val ollamaModel: String,
     val voyageApiKey: String,
     val tavilyApiKey: String,
     val postgresUrl: String,
@@ -264,8 +297,11 @@ data class AppConfig(
 ) {
     companion object {
         fun fromEnv(): AppConfig = AppConfig(
+            llmProvider = System.getenv("LLM_PROVIDER") ?: "auto",
             anthropicApiKey = System.getenv("ANTHROPIC_API_KEY") ?: "",
             llmModel = System.getenv("LLM_MODEL") ?: "claude-sonnet-4-5-20250929",
+            ollamaUrl = System.getenv("OLLAMA_URL") ?: "http://localhost:11434",
+            ollamaModel = System.getenv("OLLAMA_MODEL") ?: "qwen2.5-coder:7b",
             voyageApiKey = System.getenv("VOYAGE_API_KEY") ?: "",
             tavilyApiKey = System.getenv("TAVILY_API_KEY") ?: "",
             postgresUrl = System.getenv("POSTGRES_URL") ?: "jdbc:postgresql://localhost:5432/kai",
@@ -277,5 +313,18 @@ data class AppConfig(
             sandboxPath = System.getenv("SANDBOX_PATH")
                 ?: System.getProperty("java.io.tmpdir") + "/kai-sandbox"
         )
+    }
+}
+
+/** Ollama servisinin çalışıp çalışmadığını kontrol et */
+private fun isOllamaRunning(baseUrl: String): Boolean {
+    return try {
+        val url = java.net.URL("$baseUrl/api/version")
+        val conn = url.openConnection() as java.net.HttpURLConnection
+        conn.connectTimeout = 2000
+        conn.readTimeout = 2000
+        conn.responseCode == 200
+    } catch (_: Exception) {
+        false
     }
 }

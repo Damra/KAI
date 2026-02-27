@@ -64,17 +64,21 @@ class PipelineOrchestrator(
         // Auto-transition any remaining CREATED tasks to PLANNED
         transitionCreatedToPlanned(projectId)
 
-        val readyTasks = taskStore.getReadyTasks(projectId)
-        if (readyTasks.isEmpty()) {
+        // Get PLANNED tasks that are ready (dependencies met)
+        val plannedReady = taskStore.getReadyTasks(projectId)
+        // Also get tasks already in READY status (e.g. from interrupted runs)
+        val alreadyReady = taskStore.getTasksByProject(projectId, TaskStatus.READY)
+
+        if (plannedReady.isEmpty() && alreadyReady.isEmpty()) {
             logger.info("No ready tasks for project $projectId")
             return emptyList()
         }
 
-        logger.info("Found ${readyTasks.size} ready tasks for project $projectId")
+        logger.info("Found ${plannedReady.size} planned-ready + ${alreadyReady.size} already-ready tasks for project $projectId")
 
         // Transition PLANNED tasks to READY
         val tasksToExecute = mutableListOf<DevTask>()
-        for (task in readyTasks) {
+        for (task in plannedReady) {
             try {
                 val readyTask = taskStore.transitionTask(task.id, TaskStatus.READY, "Dependencies satisfied")
                 tasksToExecute.add(readyTask)
@@ -82,6 +86,9 @@ class PipelineOrchestrator(
                 logger.warn("Could not transition task ${task.id} to READY: ${e.message}")
             }
         }
+
+        // Add already-READY tasks directly
+        tasksToExecute.addAll(alreadyReady)
 
         // Execute each task
         for (task in tasksToExecute) {

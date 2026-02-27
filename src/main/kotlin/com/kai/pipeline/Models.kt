@@ -1,7 +1,36 @@
 package com.kai.pipeline
 
+import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.buildClassSerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.*
 import java.time.Instant
+
+/**
+ * Serializer that accepts both a JSON string and an array of strings,
+ * always converting to a single joined String.
+ */
+object FlexibleStringSerializer : KSerializer<String> {
+    override val descriptor: SerialDescriptor = buildClassSerialDescriptor("FlexibleString")
+
+    override fun deserialize(decoder: Decoder): String {
+        val input = decoder as? JsonDecoder ?: return decoder.decodeString()
+        return when (val element = input.decodeJsonElement()) {
+            is JsonPrimitive -> element.content
+            is JsonArray -> element.joinToString("\n") { it.jsonPrimitive.content }
+            else -> element.toString()
+        }
+    }
+
+    override fun serialize(encoder: Encoder, value: String) {
+        encoder.encodeString(value)
+    }
+}
 
 // ── Enums ──
 
@@ -206,6 +235,7 @@ data class AnalysisEpic(
 data class AnalysisFeature(
     val title: String,
     val description: String,
+    @Serializable(with = FlexibleStringSerializer::class)
     val acceptanceCriteria: String = "",
     val tasks: List<AnalysisTask>
 )
@@ -213,6 +243,7 @@ data class AnalysisFeature(
 @Serializable
 data class AnalysisTask(
     val title: String,
+    @Serializable(with = FlexibleStringSerializer::class)
     val description: String,
     val category: String = "BACKEND",
     val priority: String = "MEDIUM",

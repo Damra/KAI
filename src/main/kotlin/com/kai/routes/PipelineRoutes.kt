@@ -93,9 +93,9 @@ fun Route.pipelineRoutes(
 
             try {
                 val executedTasks = orchestrator.executeNextTasks(projectId)
-                call.respond(mapOf(
-                    "executed" to executedTasks.size,
-                    "tasks" to executedTasks.map { it.toResponse() }
+                call.respond(PipelineExecuteResponse(
+                    executed = executedTasks.size,
+                    tasks = executedTasks.map { it.toResponse() }
                 ))
             } catch (e: Exception) {
                 logger.error("Pipeline execution failed", e)
@@ -137,9 +137,9 @@ fun Route.pipelineRoutes(
                 val task = taskStore.getTask(id)
                     ?: return@get call.respond(HttpStatusCode.NotFound, mapOf("error" to "Task not found"))
                 val history = taskStore.getTaskHistory(id)
-                call.respond(mapOf(
-                    "task" to task.toResponse(),
-                    "history" to history.map { it.toResponse() }
+                call.respond(TaskDetailResponse(
+                    task = task.toResponse(),
+                    history = history.map { it.toResponse() }
                 ))
             } catch (e: Exception) {
                 logger.error("Failed to get task", e)

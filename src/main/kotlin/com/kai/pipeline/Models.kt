@@ -131,6 +131,18 @@ data class DevTaskResponse(
 )
 
 @Serializable
+data class TaskDetailResponse(
+    val task: DevTaskResponse,
+    val history: List<TaskTransitionResponse>
+)
+
+@Serializable
+data class PipelineExecuteResponse(
+    val executed: Int,
+    val tasks: List<DevTaskResponse>
+)
+
+@Serializable
 data class TaskTransitionRequest(
     val status: String,
     val reason: String = ""

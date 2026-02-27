@@ -1,0 +1,30 @@
+# Git
+.git
+.gitignore
+
+# Build outputs
+build/
+.gradle/
+.kotlin/
+
+# Frontend (not needed for backend build)
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/tsconfig.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Docker
+docker/
+.dockerignore
+
+# Docs & misc
+docs/
+*.md
+LICENSE
+.env
+.env.*

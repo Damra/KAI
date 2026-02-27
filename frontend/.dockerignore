@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.vite/
+tsconfig.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+
+# Git
+.git
+.gitignore
+
+# Misc
+*.md
+.env
+.env.*
+.dockerignore
+Dockerfile

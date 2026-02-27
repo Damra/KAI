@@ -16,7 +16,8 @@ class AgentFactory(
     private val memory: MemoryLayer,
     private val httpClient: HttpClient,
     private val sandboxDir: File = File(System.getProperty("java.io.tmpdir"), "kai-sandbox"),
-    private val webSearchApiKey: String = ""
+    private val webSearchApiKey: String = "",
+    private val gitHubTool: GitHubTool? = null
 ) {
     fun createAll(): Map<AgentRole, ReActAgent> {
         return mapOf(
@@ -45,11 +46,12 @@ class AgentFactory(
     fun createCodeWriter(): ReActAgent = ReActAgent(
         role = AgentRole.CODE_WRITER,
         llmClient = llmClient,
-        tools = mapOf(
-            "file_system" to FileSystemTool(sandboxDir),
-            "kotlin_compile" to KotlinCompilerTool(sandboxDir),
-            "web_search" to WebSearchTool(httpClient, webSearchApiKey)
-        ),
+        tools = buildMap {
+            put("file_system", FileSystemTool(sandboxDir))
+            put("kotlin_compile", KotlinCompilerTool(sandboxDir))
+            put("web_search", WebSearchTool(httpClient, webSearchApiKey))
+            if (gitHubTool != null) put("github", gitHubTool)
+        },
         memory = memory,
         config = ReActAgent.AgentConfig(
             maxIterations = 12,

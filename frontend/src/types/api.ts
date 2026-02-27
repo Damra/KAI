@@ -17,7 +17,9 @@ export type StreamEvent =
   | { type: "plan_update"; stepId: string; status: StepStatus; description: string }
   | { type: "delegation"; from: string; to: string; reason: string }
   | { type: "done"; answer: string; metadata: AnswerMetadata | null }
-  | { type: "error"; message: string; recoverable: boolean };
+  | { type: "error"; message: string; recoverable: boolean }
+  | { type: "pipeline_update"; taskId: string; status: string; message: string }
+  | { type: "task_created"; taskId: string; title: string; category: string };
 
 export interface CodeArtifact {
   filename: string;

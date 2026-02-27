@@ -7,8 +7,13 @@ import com.kai.llm.*
 import com.kai.memory.DualMemory
 import com.kai.memory.Neo4jStore
 import com.kai.memory.PgVectorStore
+import com.kai.pipeline.PipelineOrchestrator
+import com.kai.pipeline.ProjectAnalyzer
+import com.kai.pipeline.TaskStore
 import com.kai.routes.agentRoutes
+import com.kai.routes.pipelineRoutes
 import com.kai.routes.webSocketRoutes
+import com.kai.tools.GitHubTool
 import com.kai.tools.KotlinCompilerTool
 import com.kai.tools.TestRunnerTool
 import io.ktor.client.*
@@ -175,6 +180,10 @@ fun Application.module() {
         verificationGate = verificationGate
     )
 
+    // ── Pipeline (Phase 2) ──
+    val gitHubTool = GitHubTool(sandboxDir)
+    val pipelineComponents = initializePipeline(config, llmClient, metaController, gitHubTool)
+
     // ── Routes ──
     routing {
         // Public health check
@@ -183,6 +192,11 @@ fun Application.module() {
         // WebSocket — auth via query param (browsers can't send custom headers on WS)
         webSocketRoutes(metaController)
 
+        // Pipeline REST API
+        if (pipelineComponents != null) {
+            pipelineRoutes(pipelineComponents.first, pipelineComponents.second)
+        }
+
         // Authenticated REST endpoints
         authenticate("api-key") {
             // Future authenticated REST routes go here
@@ -190,6 +204,43 @@ fun Application.module() {
     }
 
     logger.info("KAI Agent Server ready. Agents: ${agents.keys}")
+}
+
+/**
+ * Initialize the pipeline system (TaskStore, ProjectAnalyzer, PipelineOrchestrator).
+ * Returns null if database is not configured.
+ */
+private fun initializePipeline(
+    config: AppConfig,
+    llmClient: LLMClient,
+    metaController: MetaController,
+    gitHubTool: GitHubTool
+): Pair<TaskStore, PipelineOrchestrator>? {
+    if (config.postgresUrl.isBlank()) {
+        logger.info("Pipeline disabled: no database configured")
+        return null
+    }
+
+    return try {
+        val database = Database.connect(
+            url = config.postgresUrl,
+            driver = "org.postgresql.Driver",
+            user = config.postgresUser,
+            password = config.postgresPassword
+        )
+
+        val taskStore = TaskStore(database)
+        kotlinx.coroutines.runBlocking { taskStore.initialize() }
+
+        val projectAnalyzer = ProjectAnalyzer(llmClient, taskStore)
+        val orchestrator = PipelineOrchestrator(taskStore, projectAnalyzer, gitHubTool, metaController)
+
+        logger.info("Pipeline system initialized")
+        Pair(taskStore, orchestrator)
+    } catch (e: Exception) {
+        logger.warn("Pipeline initialization failed (continuing without pipeline): ${e.message}")
+        null
+    }
 }
 
 private fun createMemoryLayer(

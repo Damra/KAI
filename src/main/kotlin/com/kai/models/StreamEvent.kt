@@ -37,4 +37,12 @@ sealed class StreamEvent {
     @Serializable
     @SerialName("error")
     data class Error(val message: String, val recoverable: Boolean) : StreamEvent()
+
+    @Serializable
+    @SerialName("pipeline_update")
+    data class PipelineUpdate(val taskId: String, val status: String, val message: String) : StreamEvent()
+
+    @Serializable
+    @SerialName("task_created")
+    data class TaskCreated(val taskId: String, val title: String, val category: String) : StreamEvent()
 }

@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { usePipeline } from "../../hooks/usePipeline";
 import { ProjectForm } from "./ProjectForm";
 import { TaskBoard } from "./TaskBoard";
 import { TaskDetail } from "./TaskDetail";
+import { StatsPanel } from "./StatsPanel";
 import {
   Plus,
   Play,
@@ -30,6 +31,7 @@ export function PipelineView() {
     loadTaskDetail,
     transitionTask,
     refresh,
+    silentRefresh,
   } = usePipeline();
 
   const [showProjectForm, setShowProjectForm] = useState(false);
@@ -37,6 +39,14 @@ export function PipelineView() {
 
   const activeProject = projects.find((p) => p.id === activeProjectId);
   const tasks = projectStatus?.tasks ?? [];
+
+  // Auto-refresh every 10 seconds (silent — no loading indicator)
+  const silentRefreshRef = useRef(silentRefresh);
+  silentRefreshRef.current = silentRefresh;
+  useEffect(() => {
+    const id = setInterval(() => silentRefreshRef.current(), 10_000);
+    return () => clearInterval(id);
+  }, []);
 
   const handleCreateProject = async (name: string, description: string, repoUrl?: string) => {
     await createProject(name, description, repoUrl);
@@ -102,18 +112,6 @@ export function PipelineView() {
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Stats */}
-          {projectStatus && (
-            <div className="flex items-center gap-3 mr-4 text-xs text-gray-500">
-              <span>Tasks: {projectStatus.totalTasks}</span>
-              {Object.entries(projectStatus.tasksByStatus).map(([status, count]) => (
-                <span key={status}>
-                  {status}: {count}
-                </span>
-              ))}
-            </div>
-          )}
-
           {/* Action buttons */}
           {activeProjectId && (
             <>
@@ -197,7 +195,10 @@ export function PipelineView() {
             </button>
           </div>
         ) : (
-          <TaskBoard tasks={tasks} onTaskClick={handleTaskClick} />
+          <>
+            {projectStatus && <StatsPanel projectStatus={projectStatus} />}
+            <TaskBoard tasks={tasks} onTaskClick={handleTaskClick} />
+          </>
         )}
       </div>
 

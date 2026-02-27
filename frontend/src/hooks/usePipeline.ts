@@ -130,6 +130,19 @@ export function usePipeline() {
     }
   }, [loadProjects, activeProjectId, loadProjectStatus]);
 
+  const silentRefresh = useCallback(async () => {
+    try {
+      const data = await api.listProjects();
+      setProjects(data);
+      if (activeProjectId !== null) {
+        const status = await api.getProjectStatus(activeProjectId);
+        setProjectStatus(status);
+      }
+    } catch {
+      // Silent refresh — don't set error or loading state
+    }
+  }, [activeProjectId]);
+
   return {
     projects,
     activeProjectId,
@@ -145,5 +158,6 @@ export function usePipeline() {
     loadTaskDetail,
     transitionTask,
     refresh,
+    silentRefresh,
   };
 }

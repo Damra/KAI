@@ -1,6 +1,7 @@
-import type { TaskDetail as TaskDetailType } from "../../types/pipeline";
+import { useState } from "react";
+import type { TaskDetail as TaskDetailType, TaskOutput } from "../../types/pipeline";
 import { STATUS_COLORS, PRIORITY_COLORS, CATEGORY_COLORS } from "../../types/pipeline";
-import { X, GitBranch, ExternalLink, Clock, ArrowRight } from "lucide-react";
+import { X, GitBranch, ExternalLink, Clock, ArrowRight, ChevronDown, ChevronRight, Code, Eye } from "lucide-react";
 
 interface Props {
   detail: TaskDetailType;
@@ -25,8 +26,50 @@ const NEXT_TRANSITIONS: Record<string, string[]> = {
   BUG_CREATED: ["CREATED"],
 };
 
+const OUTPUT_ICONS: Record<string, typeof Code> = {
+  CODE_GENERATION: Code,
+  REVIEW: Eye,
+};
+
+const OUTPUT_LABELS: Record<string, string> = {
+  CODE_GENERATION: "Code Generation",
+  REVIEW: "Review",
+  TEST_RESULT: "Test Result",
+};
+
+function OutputCard({ output }: { output: TaskOutput }) {
+  const [expanded, setExpanded] = useState(false);
+  const Icon = OUTPUT_ICONS[output.outputType] || Code;
+  const label = OUTPUT_LABELS[output.outputType] || output.outputType;
+  const preview = output.content.length > 200 ? output.content.slice(0, 200) + "..." : output.content;
+
+  return (
+    <div className="border border-[#2a2a2a] rounded-lg overflow-hidden">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-2 bg-[#1a1a1a] hover:bg-[#222] transition-colors text-left"
+      >
+        {expanded ? <ChevronDown size={14} className="text-gray-500" /> : <ChevronRight size={14} className="text-gray-500" />}
+        <Icon size={14} className="text-gray-400" />
+        <span className="text-sm font-medium text-gray-200">{label}</span>
+        <span className="text-xs text-gray-500 ml-auto">{output.agent}</span>
+        <span className="text-xs text-gray-600">{new Date(output.createdAt).toLocaleString()}</span>
+      </button>
+      {expanded ? (
+        <div className="p-3 max-h-80 overflow-y-auto">
+          <pre className="text-xs text-gray-300 whitespace-pre-wrap font-mono bg-[#0d0d0d] p-3 rounded">{output.content}</pre>
+        </div>
+      ) : (
+        <div className="px-3 py-2">
+          <pre className="text-xs text-gray-500 whitespace-pre-wrap font-mono truncate">{preview}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function TaskDetail({ detail, onClose, onTransition }: Props) {
-  const { task, history } = detail;
+  const { task, history, outputs } = detail;
   const statusColor = STATUS_COLORS[task.status] || "bg-gray-500";
   const nextStatuses = NEXT_TRANSITIONS[task.status] || [];
 
@@ -134,6 +177,18 @@ export function TaskDetail({ detail, onClose, onTransition }: Props) {
                     <ArrowRight size={12} />
                     {status}
                   </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Outputs */}
+          {outputs && outputs.length > 0 && (
+            <div>
+              <h3 className="text-sm font-medium text-gray-400 mb-2">Outputs</h3>
+              <div className="space-y-2">
+                {outputs.map((output) => (
+                  <OutputCard key={output.id} output={output} />
                 ))}
               </div>
             </div>

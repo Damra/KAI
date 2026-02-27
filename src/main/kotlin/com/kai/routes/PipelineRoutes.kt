@@ -68,6 +68,25 @@ fun Route.pipelineRoutes(
             }
         }
 
+        /** POST /api/v1/pipeline/projects/:id/analyze-and-execute — Analyze + auto-plan + execute */
+        post("/projects/{id}/analyze-and-execute") {
+            val id = call.parameters["id"]?.toLongOrNull()
+                ?: return@post call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Invalid project ID"))
+
+            try {
+                val executedTasks = orchestrator.analyzeAndExecute(id)
+                call.respond(PipelineExecuteResponse(
+                    executed = executedTasks.size,
+                    tasks = executedTasks.map { it.toResponse() }
+                ))
+            } catch (e: IllegalArgumentException) {
+                call.respond(HttpStatusCode.NotFound, mapOf("error" to e.message))
+            } catch (e: Exception) {
+                logger.error("Analyze-and-execute failed", e)
+                call.respond(HttpStatusCode.InternalServerError, mapOf("error" to "Analyze-and-execute failed: ${e.message}"))
+            }
+        }
+
         /** POST /api/v1/pipeline/projects/:id/analyze — Start task decomposition */
         post("/projects/{id}/analyze") {
             val id = call.parameters["id"]?.toLongOrNull()
@@ -137,9 +156,11 @@ fun Route.pipelineRoutes(
                 val task = taskStore.getTask(id)
                     ?: return@get call.respond(HttpStatusCode.NotFound, mapOf("error" to "Task not found"))
                 val history = taskStore.getTaskHistory(id)
+                val outputs = taskStore.getTaskOutputs(id)
                 call.respond(TaskDetailResponse(
                     task = task.toResponse(),
-                    history = history.map { it.toResponse() }
+                    history = history.map { it.toResponse() },
+                    outputs = outputs.map { it.toResponse() }
                 ))
             } catch (e: Exception) {
                 logger.error("Failed to get task", e)

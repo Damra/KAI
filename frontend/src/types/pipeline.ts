@@ -72,9 +72,19 @@ export interface ProjectStatus_Response {
   tasks: DevTask[];
 }
 
+export interface TaskOutput {
+  id: number;
+  taskId: number;
+  outputType: string;  // CODE_GENERATION, REVIEW, TEST_RESULT
+  content: string;
+  agent: string;       // CODE_WRITER, REVIEWER
+  createdAt: string;
+}
+
 export interface TaskDetail {
   task: DevTask;
   history: TaskTransition[];
+  outputs: TaskOutput[];
 }
 
 // Status column groupings for Kanban board

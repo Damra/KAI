@@ -74,6 +74,15 @@ data class TaskTransition(
     val createdAt: Instant = Instant.now()
 )
 
+data class TaskOutput(
+    val id: Long = 0,
+    val taskId: Long,
+    val outputType: String,
+    val content: String,
+    val agent: String = "",
+    val createdAt: Instant = Instant.now()
+)
+
 // ── API DTOs (Serializable for Ktor JSON) ──
 
 @Serializable
@@ -131,9 +140,20 @@ data class DevTaskResponse(
 )
 
 @Serializable
+data class TaskOutputResponse(
+    val id: Long,
+    val taskId: Long,
+    val outputType: String,
+    val content: String,
+    val agent: String,
+    val createdAt: String
+)
+
+@Serializable
 data class TaskDetailResponse(
     val task: DevTaskResponse,
-    val history: List<TaskTransitionResponse>
+    val history: List<TaskTransitionResponse>,
+    val outputs: List<TaskOutputResponse> = emptyList()
 )
 
 @Serializable
@@ -226,4 +246,9 @@ fun DevTask.toResponse() = DevTaskResponse(
 fun TaskTransition.toResponse() = TaskTransitionResponse(
     id = id, taskId = taskId, fromStatus = fromStatus.name, toStatus = toStatus.name,
     reason = reason, triggeredBy = triggeredBy, createdAt = createdAt.toString()
+)
+
+fun TaskOutput.toResponse() = TaskOutputResponse(
+    id = id, taskId = taskId, outputType = outputType, content = content,
+    agent = agent, createdAt = createdAt.toString()
 )

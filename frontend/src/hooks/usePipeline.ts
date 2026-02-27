@@ -73,7 +73,7 @@ export function usePipeline() {
     try {
       setLoading(true);
       setError(null);
-      await api.analyzeProject(projectId);
+      await api.analyzeAndExecute(projectId);
       await loadProjectStatus(projectId);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Analysis failed");

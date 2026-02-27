@@ -61,3 +61,11 @@ object TaskTransitions : LongIdTable("pipeline_task_transitions") {
     val triggeredBy = varchar("triggered_by", 100).default("")
     val createdAt = timestamp("created_at").clientDefault { java.time.Instant.now() }
 }
+
+object TaskOutputs : LongIdTable("pipeline_task_outputs") {
+    val taskId = reference("task_id", DevTasks, onDelete = ReferenceOption.CASCADE)
+    val outputType = varchar("output_type", 50)  // CODE_GENERATION, REVIEW, TEST_RESULT
+    val content = text("content")
+    val agent = varchar("agent", 100).default("")  // CODE_WRITER, REVIEWER
+    val createdAt = timestamp("created_at").clientDefault { java.time.Instant.now() }
+}

@@ -28,10 +28,42 @@ class PipelineOrchestrator(
     }
 
     /**
+     * Analyze project + auto-transition CREATED→PLANNED + execute.
+     * Single-click pipeline: analyze → plan → execute.
+     */
+    suspend fun analyzeAndExecute(projectId: Long, onEvent: (suspend (StreamEvent) -> Unit)? = null): List<DevTask> {
+        // Step 1: Analyze — creates tasks in CREATED status
+        val analysisResult = analyzeProject(projectId)
+        logger.info("Analysis complete: ${analysisResult.epics.size} epics created")
+
+        // Step 2: Transition all CREATED tasks to PLANNED
+        transitionCreatedToPlanned(projectId)
+
+        // Step 3: Execute the pipeline
+        return executeNextTasks(projectId, onEvent)
+    }
+
+    /** Bulk-transition all CREATED tasks for a project to PLANNED */
+    private suspend fun transitionCreatedToPlanned(projectId: Long) {
+        val createdTasks = taskStore.getTasksByProject(projectId, TaskStatus.CREATED)
+        logger.info("Transitioning ${createdTasks.size} CREATED tasks to PLANNED for project $projectId")
+        for (task in createdTasks) {
+            try {
+                taskStore.transitionTask(task.id, TaskStatus.PLANNED, "Auto-planned by pipeline")
+            } catch (e: Exception) {
+                logger.warn("Could not transition task ${task.id} CREATED→PLANNED: ${e.message}")
+            }
+        }
+    }
+
+    /**
      * Execute the next batch of ready tasks for a project.
      * Returns the list of tasks that were started.
      */
     suspend fun executeNextTasks(projectId: Long, onEvent: (suspend (StreamEvent) -> Unit)? = null): List<DevTask> {
+        // Auto-transition any remaining CREATED tasks to PLANNED
+        transitionCreatedToPlanned(projectId)
+
         val readyTasks = taskStore.getReadyTasks(projectId)
         if (readyTasks.isEmpty()) {
             logger.info("No ready tasks for project $projectId")
@@ -101,6 +133,13 @@ class PipelineOrchestrator(
         val codeResult = metaController.process(codePrompt, "pipeline-task-$taskId", onEvent)
         logger.info("Code generation complete for task ${task.id}")
 
+        // Save code generation output
+        try {
+            taskStore.saveTaskOutput(taskId, "CODE_GENERATION", codeResult.answer, "CODE_WRITER")
+        } catch (e: Exception) {
+            logger.warn("Failed to save code output for task $taskId: ${e.message}")
+        }
+
         // Step 4: Transition to PR_OPENED
         taskStore.transitionTask(taskId, TaskStatus.PR_OPENED, "Code generated")
 
@@ -125,6 +164,13 @@ class PipelineOrchestrator(
         taskStore.transitionTask(taskId, TaskStatus.REVIEWING, "PR created: $prUrl")
         val reviewPrompt = "Review the code generated for task: ${task.title}\n\nCode output:\n${codeResult.answer.take(2000)}"
         val reviewResult = metaController.process(reviewPrompt, "pipeline-review-$taskId", onEvent)
+
+        // Save review output
+        try {
+            taskStore.saveTaskOutput(taskId, "REVIEW", reviewResult.answer, "REVIEWER")
+        } catch (e: Exception) {
+            logger.warn("Failed to save review output for task $taskId: ${e.message}")
+        }
 
         // Step 7: Approve or request changes (simple heuristic for now)
         val isApproved = !reviewResult.answer.lowercase().let {

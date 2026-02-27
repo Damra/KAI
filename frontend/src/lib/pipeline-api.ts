@@ -40,6 +40,10 @@ export async function analyzeProject(projectId: number): Promise<unknown> {
   return pipelineFetch(`/projects/${projectId}/analyze`, { method: "POST" });
 }
 
+export async function analyzeAndExecute(projectId: number): Promise<{ executed: number; tasks: DevTask[] }> {
+  return pipelineFetch(`/projects/${projectId}/analyze-and-execute`, { method: "POST" });
+}
+
 // ── Pipeline Execution ──
 
 export async function executePipeline(projectId: number): Promise<{ executed: number; tasks: DevTask[] }> {

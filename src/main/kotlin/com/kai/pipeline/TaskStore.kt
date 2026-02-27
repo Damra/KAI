@@ -17,7 +17,7 @@ class TaskStore(private val database: Database) {
     /** Create pipeline tables if they don't exist */
     suspend fun initialize() {
         newSuspendedTransaction(db = database) {
-            SchemaUtils.create(Projects, Epics, Features, DevTasks, TaskDependencies, TaskTransitions)
+            SchemaUtils.create(Projects, Epics, Features, DevTasks, TaskDependencies, TaskTransitions, TaskOutputs)
         }
         logger.info("Pipeline tables initialized")
     }
@@ -253,6 +253,30 @@ class TaskStore(private val database: Database) {
         }
     }
 
+    // ── Task Outputs ──
+
+    suspend fun saveTaskOutput(taskId: Long, outputType: String, content: String, agent: String = ""): TaskOutput {
+        return newSuspendedTransaction(db = database) {
+            val now = Instant.now()
+            val id = TaskOutputs.insertAndGetId {
+                it[TaskOutputs.taskId] = taskId
+                it[TaskOutputs.outputType] = outputType
+                it[TaskOutputs.content] = content
+                it[TaskOutputs.agent] = agent
+                it[TaskOutputs.createdAt] = now
+            }
+            TaskOutput(id = id.value, taskId = taskId, outputType = outputType, content = content, agent = agent, createdAt = now)
+        }
+    }
+
+    suspend fun getTaskOutputs(taskId: Long): List<TaskOutput> {
+        return newSuspendedTransaction(db = database) {
+            TaskOutputs.selectAll().where { TaskOutputs.taskId eq taskId }
+                .orderBy(TaskOutputs.createdAt, SortOrder.ASC)
+                .map { it.toTaskOutput() }
+        }
+    }
+
     // ── Row mapping helpers ──
 
     private fun ResultRow.toProject() = Project(
@@ -312,5 +336,14 @@ class TaskStore(private val database: Database) {
         reason = this[TaskTransitions.reason],
         triggeredBy = this[TaskTransitions.triggeredBy],
         createdAt = this[TaskTransitions.createdAt]
+    )
+
+    private fun ResultRow.toTaskOutput() = TaskOutput(
+        id = this[TaskOutputs.id].value,
+        taskId = this[TaskOutputs.taskId].value,
+        outputType = this[TaskOutputs.outputType],
+        content = this[TaskOutputs.content],
+        agent = this[TaskOutputs.agent],
+        createdAt = this[TaskOutputs.createdAt]
     )
 }

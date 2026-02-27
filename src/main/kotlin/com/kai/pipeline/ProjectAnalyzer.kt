@@ -13,7 +13,7 @@ class ProjectAnalyzer(
     private val taskStore: TaskStore
 ) {
     private val logger = LoggerFactory.getLogger(ProjectAnalyzer::class.java)
-    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true; allowTrailingComma = true }
 
     companion object {
         private const val MAX_RETRIES = 2

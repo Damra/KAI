@@ -227,17 +227,17 @@ data class AnalysisResult(
 @Serializable
 data class AnalysisEpic(
     val title: String,
-    val description: String,
-    val features: List<AnalysisFeature>
+    val description: String = "",
+    val features: List<AnalysisFeature> = emptyList()
 )
 
 @Serializable
 data class AnalysisFeature(
     val title: String,
-    val description: String,
+    val description: String = "",
     @Serializable(with = FlexibleStringSerializer::class)
     val acceptanceCriteria: String = "",
-    val tasks: List<AnalysisTask>
+    val tasks: List<AnalysisTask> = emptyList()
 )
 
 @Serializable

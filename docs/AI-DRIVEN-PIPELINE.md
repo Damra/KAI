@@ -442,38 +442,45 @@ Orijinal surec taniminda olmayip eklenmesi gereken surecler:
 
 ## 7. Uygulama Stratejisi (Fazli Yaklasim)
 
-### Phase 1 — Foundation (mevcut durum)
+### Phase 1 — Foundation (tamamlandi)
 
 - [x] Multi-agent ReAct mimarisi
 - [x] Ollama lokal LLM entegrasyonu
 - [x] WebSocket streaming
 - [x] Episodic memory (pgvector)
 - [x] Semantic memory (Neo4j)
-- [ ] Temel chat arayuzu calisiyor
+- [x] React frontend + pipeline dashboard
+- [x] Docker Compose ile tek komutla kurulum
 
-**Hedef:** Temel altyapi calissin.
+**Hedef:** Temel altyapi calissin. **TAMAMLANDI.**
 
 ---
 
-### Phase 2 — Task Pipeline
+### Phase 2 — Task Pipeline (tamamlandi)
 
+- [x] Otomatik branch olusturma (`feature/<task-id>-<slug>`)
+- [x] Task state machine (CREATED -> PLANNED -> READY -> IN_PROGRESS -> PR_OPENED -> REVIEWING -> APPROVED -> MERGED -> TESTING -> TEST_PASSED -> DEPLOYED)
+- [x] Otomatik PR acma (sandbox icinde)
+- [x] Basit AI code review (CODE_WRITER uretir, REVIEWER inceler)
+- [x] Task dependency tracking (dependsOnTitles ile)
+- [x] Pipeline otomasyon: tek tikla analyze + plan + execute (`analyzeAndExecute`)
+- [x] Otomatik CREATED -> PLANNED gecisi (toplu transition)
+- [x] READY task'larin kesilmis pipeline sonrasi tekrar alinmasi
+- [x] Task output kaydi (CODE_GENERATION ve REVIEW sonuclari DB'ye kaydedilir)
+- [x] Task output gosterimi (frontend'de collapsible code/review kartlari)
+- [x] LLM JSON parser: retry mekanizmasi (3 deneme), flexible serializer (array/string), trailing comma toleransi
 - [ ] GitHub Issues entegrasyonu (issue olusturma/okuma/guncelleme)
-- [ ] Otomatik branch olusturma (`feature/<task-id>`)
-- [ ] Task state machine (CREATED -> PLANNED -> IN_PROGRESS -> PR_OPENED -> ...)
-- [ ] Otomatik PR acma
-- [ ] Basit AI code review (PR diff uzerinde)
-- [ ] Task dependency tracking
 
-**Hedef:** Git workflow otomasyonu.
+**Hedef:** Git workflow otomasyonu. **BUYUK OLCUDE TAMAMLANDI.** (GitHub Issues entegrasyonu haric)
 
 ---
 
-### Phase 3 — Multi-Agent Development
+### Phase 3 — Multi-Agent Development (devam ediyor)
 
+- [x] Planner agent (proje tanimindan task kirilimi — ProjectAnalyzer)
+- [x] Dependency-aware scheduling (PLANNED task'lar dependency'ler tamamlaninca READY olur)
 - [ ] Paralel developer agent'lar (birden fazla task ayni anda)
-- [ ] Planner agent (proje tanimindan task kirilimi)
 - [ ] Emergent task detection (gelistirme sirasinda yeni ihtiyac kesfi)
-- [ ] Dependency-aware scheduling (critical path optimization)
 - [ ] Context gathering (mevcut codebase analizi, API contracts, design specs)
 - [ ] Agent delegation (bir agent'in isi baska agent'a devretmesi)
 

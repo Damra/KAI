@@ -19,3 +19,7 @@ Thumbs.db
 
 # Sandbox
 kai-sandbox/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/

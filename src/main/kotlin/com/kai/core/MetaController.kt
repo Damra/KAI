@@ -40,6 +40,32 @@ class MetaController(
     ): AgentResponse {
         logger.info("Processing request: ${userRequest.take(100)}")
 
+        // ═══ DOĞRUDAN LLM YANITI (multi-agent pipeline geçici olarak devre dışı) ═══
+        onStep?.invoke(StreamEvent.Thinking("Düşünüyorum..."))
+        val answer = try {
+            llmClient.chat(
+                system = """Sen KAI, cok yetenekli bir AI kod asistanisin.
+                    |Kullanicinin dilinde yanit ver (genellikle Turkce).
+                    |Kod isteklerinde Kotlin/Ktor oncelikli yaz.
+                    |Kod bloklari icin markdown ``` kullan.
+                    |Kisa, net ve yardimci ol.""".trimMargin(),
+                user = userRequest
+            )
+        } catch (e: Exception) {
+            logger.error("LLM chat failed", e)
+            "Bir hata olustu: ${e.message}"
+        }
+        val finalAnswer = answer.ifEmpty { "Merhaba! Size nasil yardimci olabilirim?" }
+        logger.info("LLM response received (${finalAnswer.length} chars)")
+        onStep?.invoke(StreamEvent.Done(finalAnswer, null))
+        return AgentResponse(
+            answer = finalAnswer,
+            artifacts = emptyList(),
+            planSteps = emptyList(),
+            metadata = AnswerMetadata(totalSteps = 1, toolsUsed = emptyList(), totalDurationMs = 0, agentsInvolved = emptyList())
+        )
+
+        /* ═══ MULTI-AGENT PIPELINE (şimdilik devre dışı) ═══
         // ═══ ADIM 1: PLANLAMA ═══
         val plan = planTask(userRequest)
         logger.info("Plan created with ${plan.steps.size} steps")
@@ -114,6 +140,7 @@ class MetaController(
 
         // ═══ ADIM 4: SONUÇ BİRLEŞTİRME ═══
         return synthesizeResults(plan, results, stepResults)
+        MULTI-AGENT PIPELINE SONU */
     }
 
     /** Tek bir plan adımını çalıştır */
@@ -285,6 +312,20 @@ class MetaController(
                 agentsInvolved = allAgents
             )
         )
+    }
+
+    /** Basit mesaj mı kontrol et (selamlama, kısa soru, kod içermeyen) */
+    private fun isSimpleMessage(message: String): Boolean {
+        val lower = message.trim().lowercase()
+        val wordCount = lower.split("\\s+".toRegex()).size
+        // Kısa mesajlar (5 kelimeden az) ve kod/teknik terim içermeyenler
+        if (wordCount <= 5 && !lower.contains("```") && !lower.contains("kod") &&
+            !lower.contains("code") && !lower.contains("yaz") && !lower.contains("write") &&
+            !lower.contains("create") && !lower.contains("oluştur") && !lower.contains("implement") &&
+            !lower.contains("fix") && !lower.contains("düzelt") && !lower.contains("debug") &&
+            !lower.contains("refactor")
+        ) return true
+        return false
     }
 
     /** JSON'u markdown code block'undan çıkar */

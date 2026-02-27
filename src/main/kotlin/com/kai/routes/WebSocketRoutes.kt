@@ -18,6 +18,17 @@ fun Route.webSocketRoutes(metaController: MetaController) {
 
     /** WebSocket /ws/agent — Gerçek zamanlı streaming */
     webSocket("/ws/agent") {
+        // Auth: query param ?token=xxx (browser WS API custom header gönderemez)
+        val expectedKey = System.getenv("KAI_API_KEY") ?: "dev-key"
+        val token = call.parameters["token"]
+        if (token != expectedKey) {
+            send(Frame.Text(json.encodeToString<StreamEvent>(
+                StreamEvent.Error("Unauthorized: invalid or missing token", recoverable = false)
+            )))
+            close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "Unauthorized"))
+            return@webSocket
+        }
+
         val sessionId = call.parameters["session"] ?: UUID.randomUUID().toString()
         logger.info("WebSocket connected [session=$sessionId]")
 
@@ -48,8 +59,8 @@ fun Route.webSocketRoutes(metaController: MetaController) {
                             userRequest = request.message,
                             sessionId = sessionId
                         ) { event ->
-                            // Her adımı anında stream et
                             val eventJson = json.encodeToString<StreamEvent>(event)
+                            logger.info("WS sending event: ${eventJson.take(200)}")
                             send(Frame.Text(eventJson))
                         }
                     } catch (e: Exception) {

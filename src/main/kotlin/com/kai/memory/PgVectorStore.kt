@@ -27,7 +27,7 @@ class PgVectorStore(private val database: Database) {
                     trajectory_summary TEXT NOT NULL,
                     outcome_score DOUBLE PRECISION NOT NULL,
                     artifacts JSONB DEFAULT '[]',
-                    embedding vector(1536),
+                    embedding vector(768),
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 )
                 """.trimIndent()

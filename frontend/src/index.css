@@ -1,0 +1,41 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface: #1a1a1a;
+  --color-surface-hover: #242424;
+  --color-surface-border: #2a2a2a;
+  --color-brand: #3b82f6;
+  --color-brand-dim: #1e40af;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #333;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* highlight.js overrides for dark theme */
+.hljs {
+  background: #111 !important;
+  padding: 1rem !important;
+  border-radius: 0 0 0.5rem 0.5rem;
+  overflow-x: auto;
+}
+
+/* Pulse animation for running steps */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+.animate-pulse-dot {
+  animation: pulse-dot 1.5s ease-in-out infinite;
+}

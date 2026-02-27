@@ -14,9 +14,11 @@ data class AgentTask(
         // teknik terimleri çıkar
         val words = description.split("\\s+".toRegex())
         return words.filter { word ->
-            word.first().isUpperCase() ||
+            word.isNotEmpty() && (
+                word.first().isUpperCase() ||
                 word.contains('.') ||
                 TECHNICAL_TERMS.any { term -> word.contains(term, ignoreCase = true) }
+            )
         }.distinct()
     }
 

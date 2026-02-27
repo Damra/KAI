@@ -180,9 +180,12 @@ fun Application.module() {
         // Public health check
         agentRoutes(metaController)
 
-        // Authenticated endpoints
+        // WebSocket — auth via query param (browsers can't send custom headers on WS)
+        webSocketRoutes(metaController)
+
+        // Authenticated REST endpoints
         authenticate("api-key") {
-            webSocketRoutes(metaController)
+            // Future authenticated REST routes go here
         }
     }
 
@@ -213,6 +216,7 @@ private fun createMemoryLayer(
         }
 
         val pgVectorStore = PgVectorStore(database)
+        kotlinx.coroutines.runBlocking { pgVectorStore.initialize() }
 
         val neo4jDriver = GraphDatabase.driver(
             config.neo4jUrl,
